@@ -1,0 +1,489 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <title>NUMA</title>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="./css/reset.css">
+    <link rel="stylesheet" href="./css/style.css">
+    <script src="./JS/jquery-3.5.1.min.js"></script>
+    <script src="./JS/Tiny2D.js"></script>
+    <script>
+        "use strict";
+        /*----------------------------------
+            グローバル変数の設定
+          ----------------------------------*/
+        // 生成するエンティティの内、init関数の外でも参照するもの
+        let diffuser, gate_l, gate_r, jackpot
+
+        // 重要概念たち
+        let ctx, engine, timer, offset = 0, 
+            isKeyDown = false; // 球発射の操作に使う変数
+
+        // ゲーム進行度
+        let shotBall = 0, spendMoney=0, 
+            hit_gate = 0, hit_kroon1 = 0, hit_kroon2 = 0, hit_kroon3 = 0, hit_jackpot = 0
+
+        //開発者用のパチンコ台調整変数
+        let settings = {
+            // シミュレーション用
+            color : 'rgba(200, 0, 0, 0)',   // 透明描画エンティティの可視化。透明度(第4引数)を変更。
+            elapsed : 0.02,                 // 物理エンジンでのベクトル計算の変化単位。この値が小さい程、計算精度が高い(同じだけのエンティティの物理移動量に対して計算回数が多い)。
+            time : 20,                      // ミリ秒単位。tick関数の発火間隔として参照。この値が小さい程、現実世界(ブラウザ上)での動きが早く見える(物理エンジンを呼び出す頻度が高い)。
+            // ゲーム難易度 & 各種条件
+            space : {                       // 釘の森の釘間隔 ※球の半径5, 釘の半径2
+                x : 30,                     // x軸
+                y : 15 } ,                  // y軸
+            gate : {
+                velocity : 2,               // 門番の開閉速度を制御
+                overlap : 30 },             // 門番の閉じた時の被りを制御。大きい程閉じ時間が長くなる。
+            hit : {                         // エンティティ同士の衝突によるイベント発生条件(ゲーム難易度)
+                gate : 100,                  // 門番が壊れるまでに必要な衝突回数
+                kroon1 : 20,                // クルーン1段目の排球溝が溢れるまでに必要な衝突回数
+                kroon2 : 20,                // クルーン2段目の排球溝が溢れるまでに必要な衝突回数
+                kroon3 : 20                 // クルーン3段目が溢れる(当たり穴に入る)までに必要な衝突回数
+            }, 
+            shot : {
+                first : 50,                 // 表情変化点1
+                second : 150,                // 表情変化点2
+                third : 250                 // 表情変化点3
+            }
+        }
+
+        //#region 演出系
+        let sound_bgm = document.getElementById("bgm"),                 // BGM => Chromeのポリシーで自動再生できないからaudioタグにした。
+            sound_gate = new Audio("./sound/sound_gate.mp3"),           // 門番への衝突音
+            sound_kroon12 = new Audio("./sound/sound_kroon12.mp3"),     // クルーン1,2段目への衝突音
+            sound_kroon3 = new Audio("./sound/sound_kroon3.mp3"),       // クルーン3段目への衝突音
+            sound_first = new Audio("./sound/sound_first.m4a"),
+            sound_second = new Audio("./sound/sound_second.m4a"),
+            sound_gateClear = new Audio("./sound/sound_gateClear.m4a"), //
+            sound_kroonClear = new Audio("./sound/sound_kroonClear.m4a"),
+            sound_katsu = new Audio("./sound/sound_katsu.m4a"),
+            sound_jackpot = new Audio("./sound/sound_jackpot.m4a"),
+            img_visual = ["./img/title.jpg", "./img/unmei.jpg", "./img/deadoralive2.jpg", "./img/gate1.jpg", "./img/kroon1.jpg", "./img/kroon2.jpg", "./img/kroon3.jpg", "./img/bonus1.jpg"],
+            img_kaiji = ["./img/kaiji0.jpg", "./img/kaiji1.jpg", "./img/kaiji2.jpg", "./img/kaiji3.jpg", "./img/kaiji4.jpg", "./img/kaiji5.jpg", "./img/kaiji6.jpg"],
+            img_ichijo = ["./img/ichijo0.png", "./img/ichijo1.jpg","./img/ichijo2.jpg","./img/ichijo3.jpg","./img/ichijo4.png","./img/ichijo5.jpg", "./img/ichijo6.jpg"],
+            visual = 0, looks_kaiji = 0, looks_ichijo = 0;
+        //#endregion
+
+        /*----------------------------------
+            初期化関数の設定
+          ----------------------------------*/
+        function init() { // 初期化関数：諸設定 & エンティティ(パチンコ台の要素たち)を生成
+            //#region 重要概念：物理エンジン初期化, キャンバス・コンテキスト取得, タイマー設定, イベントハンドラ設定
+            engine = new Engine(-100, -100, 1000, 1200, 0, 20);
+            let canvas = document.getElementById("canvas"); // documentオブジェクトに対しメソッドを発動、#canvasのhtml要素オブジェクトを取得
+            ctx = canvas.getContext("2d"); // canvas要素に対してgetContextメソッドを発動し、コンテキストオブジェクトを取得
+            canvas.oncontextmenu = function (e) { e.preventDefault(); }; // .oncontextmenu: 右クリックイベント e.preventDefault:イベントのデフォルト動作を無効化する。つまり右クリックのときにメニューウインドウが勝手に開くのを防いでいる
+            timer = setInterval(tick, settings.time); // ここで20ミリ秒ごとにtick関数が発火 => ここで物理計算(コマ送り)の速度を制御できる
+            document.onkeydown = mykeydown; // documentオブジェクトにonkeydownプロパティを設定
+            document.onkeyup = mykeyup; // documentオブジェクトにonkeyupプロパティを設定
+            //#endregion
+
+            //#region 壁を生成
+            let walls = [ // 壁オブジェクトを生成するための座標とサイズ情報を配列で指定。コードを少しでも短く。。
+                [-100, -100, 100, 400], // 境界線の役割(キャンバス座標系の外に実体を持つ)。
+                [-100, -100, 800, 100], // 幅を持つのはエンジンの不完全性による透過を防止する為。
+                [500, -100, 100, 400], // 左右の壁の高さは死に玉の跳ね返りを受けない為に敢えて下半分は生成しない。
+                ];
+            walls.forEach(function (w) {
+                let r = new RectangleEntity(w[0], w[1], w[2], w[3]); // 各配列の要素を呼び出して矩形生成
+                r.color = "gray";
+                engine.entities.push(r);
+            });
+            //#endregion
+
+            //#region 境界線を生成
+            let r = new LineEntity(20, 200, 20, 800, 1.2); // 5つ目の引数は反発係数
+            r.color = "gray";
+            r.lineWidth = 3;
+            engine.entities.push(r);
+            //#endregion
+
+            //#region 拡散線を生成
+            diffuser = new LineEntity(0, 50, 50, 0, 1.5); // 球を拡散するための可動線
+            diffuser.sign = -1; // 動きの方向を制御するプロパティを設定 => 後でtick関数で使う
+            diffuser.lineWidth = 3;
+            engine.entities.push(diffuser);
+            //#endregion
+
+            //#region 釘の森を生成
+            for (let i = 0 ; i < 250/settings.space.y ; i++) {
+                for (let j = 0 ; j < 480/settings.space.x - 1 ; j++) {
+                    let x = (j * settings.space.x + 50) - settings.space.x/2 * (i % 2);
+                    let r = new CircleEntity(x, i * settings.space.y + 100, 2, BodyStatic, 0.8);
+                    r.color = "gold";
+                    engine.entities.push(r);
+                }
+            }
+            //#endregion
+
+            //#region 門番(動的役物)を生成 左右対象
+            gate_l = new LineEntity(180, 420, 240, 400, 1.0); // 
+            gate_l.sign = 1; // 動きの方向を制御するプロパティを設定 => 後でtick関数で使う
+            gate_l.lineWidth = 15;
+            gate_l.color = "rgba(0, 0, 0, 1)"
+
+            gate_r = new LineEntity(340, 420, 280, 400, 1.0);
+            gate_r.sign = -1; // 動きの方向を制御するプロパティを設定 => 後でtick関数で使う
+            gate_r.lineWidth = 15;
+            gate_r.color = "rgba(0, 0, 0, 1)"
+
+            engine.entities.push(gate_l);
+            engine.entities.push(gate_r);
+            //#endregion
+
+            //#region 三段クルーン と 球が溢れる演出のための壁 と 変な方向からの球の侵入を防ぐ庇 を生成
+            let kroons = [ // 三弾クルーン
+                [210, 465, 100, 10],
+                [210, 495, 100, 10],
+                [210, 530, 100, 20]
+            ]
+            kroons.forEach(function(w,i){
+                r = new RectangleEntity(w[0], w[1], w[2], w[3]);
+                r.color = settings.color;
+                i += 1;                     // nameプロパティの段数が0,1,2だと嫌だから
+                r.name = "kroon" + i;       // クルーンにnameプロパティを付与する => 区別して扱う
+                engine.entities.push(r);
+            }) 
+
+            let covers = [ // クルーンのカバー
+                [207, 500, 3, 100],
+                [310, 500, 3, 100]
+            ]
+            covers.forEach(function(w){
+                let r = new RectangleEntity(w[0], w[1], w[2], w[3]);
+                r.color = settings.color;
+                engine.entities.push(r);
+            })
+
+            let eaves = [ // クルーンを守る庇(変な方向からの球の侵入を防ぐ)
+                [200, 420, 158, 530],
+                [320, 420, 362, 530]
+            ]
+            eaves.forEach(function(w){
+                let r = new LineEntity(w[0], w[1], w[2], w[3]);
+                r.color = settings.color;
+                engine.entities.push(r);
+            })
+            //#endregion
+
+            //#region 大当たりを生成
+            jackpot = new CircleEntity(262, 590, 5, BodyStatic, 0); // 大当たりは小さな円体。クルーン三段目が特殊な条件を満たした時に生成される球だけがヒットできる
+            jackpot.color = settings.color;
+            jackpot.virgin = true; // 大当たり未発生を管理するプロパティ
+            engine.entities.push(jackpot);
+            //#endregion
+
+            console.log(engine);    // 物理エンジンの中身確認。初期化関数が走った時点でのエンティティ配列とか。
+            console.log(ctx);       // コンテキストの中身確認。
+        }
+
+        /*----------------------------------
+            tick関数 +α の設定
+          ----------------------------------*/
+        function tick() { // 現実世界の時間経過により勝手に発火し続けさせたい処理
+            //#region 拡散線の動きを制御 (物理エンジン無関係)
+            diffuser.x1 = diffuser.x1 + 2*diffuser.sign;
+            diffuser.sign *= (diffuser.x1 < 20 || diffuser.x1 >70) ? -1 : 1;
+            diffuser.y0 = diffuser.y0 + 1*diffuser.sign;
+            diffuser.sign *= (diffuser.y0 < 20 || diffuser.y0 >70) ? -1 : 1;
+            //#endregion
+
+            //#region 門番の動きを制御 (物理エンジン無関係)
+            if(hit_gate <= settings.hit.gate){ // 門番へのヒット回数が一定以下なら門番は動く
+                gate_l.x1 = gate_l.x1 + settings.gate.velocity * gate_l.sign;
+                gate_r.x1 = gate_r.x1 + settings.gate.velocity * gate_r.sign;
+            } else{ // ヒット回数が一定数を超えると、開きっぱなし(破壊!)
+                gate_l.x1 = 220;
+                gate_r.x1 = 300;
+            }
+            gate_l.sign *= (gate_l.x1 <= 240 || gate_l.x1 >= 260 + settings.gate.overlap) ? -1 : 1
+            gate_r.sign *= (gate_r.x1 <= 260 - settings.gate.overlap  || gate_r.x1 >= 280) ? -1 : 1
+            //#endregion
+
+            //#region 物理エンジンを動かし, 再描画
+            engine.step(settings.elapsed);  // 物理エンジンの時刻を進める ※tick関数1回呼び出し当たりの物理世界の更新間隔。tick関数の呼び出し間隔(=現実世界の更新間隔)を調整すればよい
+            repaint();          // 再描画関数を発火。つまり50ミリ秒ごとに描画しなおしている
+            //#endregion
+
+            //#region 球の発射速度を設定
+            if (isKeyDown) { // keydownがtrueの間、
+                offset = Math.min(Math.max(offset + 1, 20), 50);   // 変数offsetを大きくし続ける。但し、最小値は20, 最大値は50とする
+            } // offsetは球の発射速度になる ↓ function mykeyup()で参照
+            //#endregion
+        }
+
+        //#region イベントハンドラ
+        function mykeydown(e) { // nullならfalse, 押されていればtrue
+            if (e.keyCode == 32) { // スペースキーで発火 => 球発射処理
+                isKeyDown = true;
+                decoration();
+                music();
+            }
+            if (e.keyCode == 13) {
+                videoPlay();
+                $("#insert").slideUp(1000);
+            }
+        }
+        //#endregion
+
+        //#region 音声ファイル再生の関数を定義
+        function soundPlay(file){
+            file.volume = 1.0;
+            file.pause();
+            file.currentTime = 0;
+            file.play();
+        }
+        //#endregion
+
+        /*----------------------------------
+            球発射関数の設定
+          ----------------------------------*/
+        function mykeyup(e) {
+            if (e.keyCode == 32){ // スペースキーで発火
+                isKeyDown = false; // まずkeydown状態を解除
+                let r = new CircleEntity(10, 500, 5, BodyDynamic, 0.8); // 球を生成
+                r.color = "silver"; // colorプロパティを設定
+                r.velocity.y = -offset*(1.5 + Math.random() ) ; // 初速プロパティを設定
+                r.onhit = function (me, peer) { // onhitメソッドを定義。発火する際に、引数は(me = this, peer = 衝突相手オブジェクト)が与えられる
+                    if (peer == gate_l || peer == gate_r) {
+                        hit_gate++;
+                        if (hit_gate == settings.hit.gate) {
+                            soundPlay(sound_gateClear);
+                        }
+                        if (hit_gate <= settings.hit.gate){ // 門番が壊れたあとは煩いので鳴らさない
+                            soundPlay(sound_gate);
+                        }
+                    }
+                    if (peer.name == "kroon1") { // 衝突相手がkroon1ならば
+                        engine.entities = engine.entities.filter(function (e) {
+                            return e != me; // me 以外のエンティティからなる配列を新たに生成 => つまりme を配列から除く
+                        });
+                        hit_kroon1++;
+                        soundPlay(sound_kroon12);
+                        if (hit_kroon1 == settings.hit.kroon1){
+                            soundPlay(sound_kroonClear);
+                        }
+                        if (hit_kroon1 > settings.hit.kroon1){ // kroon1へのヒット数がある程度貯まったら、
+                            let r2 = new CircleEntity(260 + (0.5 - Math.random())*10, 472 + 0.5 - Math.random(), 5, BodyDynamic, 0.1); // 球が2段目へ落ちる球を生成
+                            r2.color = "silver";
+                            r2.velocity.y = 1;
+                            r2.onhit = function (me, peer){ // この球にもonhitメソッドを定義してあげる
+                                if (peer.name == "kroon2") { // 衝突相手がkroon2ならば
+                                    engine.entities = engine.entities.filter(function (e) {
+                                    return e != me; // me 以外のエンティティからなる配列を新たに生成 => つまりme を配列から除く
+                                    });
+                                    hit_kroon2++;
+                                    soundPlay(sound_kroon12);
+                                    if (hit_kroon2 == settings.hit.kroon2){
+                                        soundPlay(sound_katsu);
+                                    }
+                                    if (hit_kroon2 > settings.hit.kroon2){ // kroon2へのヒット数がある程度貯まったら、
+                                        let r3 = new CircleEntity(260 + (0.5 - Math.random())*10, 502 + 0.5 - Math.random(), 5, BodyDynamic, 0.1); // 球が3段目へ落ちる
+                                        r3.color = "silver";
+                                        r3.velocity.y = 1;
+                                        r3.onhit = function (me, peer){ // この球にもonhitメソッドを定義してあげる
+                                            if (peer.name == "kroon3") { // 衝突相手がkroon3ならば
+                                                engine.entities = engine.entities.filter(function (e) {
+                                                return e != me; // me 以外のエンティティからなる配列を新たに生成 => つまりme を配列から除く
+                                            });
+                                            hit_kroon3++;
+                                            soundPlay(sound_kroon3);
+                                            if (hit_kroon3 > settings.hit.kroon3){ // kroon2へのヒット数がある程度貯まったら、
+                                                let r4 = new CircleEntity(260 + (0.5 - Math.random())*10, 532 + 0.5 - Math.random(), 5, BodyDynamic, 0.1); // 球が3段目に貯まるように生成される
+                                                r4.color = "silver";
+                                                r4.velocity.y = 1;
+                                                r4.onhit = function (me, peer){
+                                                    if (peer == jackpot && jackpot.virgin) {
+                                                        jackpot.virgin = false; // バージンじゃなくなる
+                                                        soundPlay(sound_jackpot);
+                                                        $("#insert").slideDown(3000);
+                                                    }
+                                                }
+                                                engine.entities.push(r4);
+                                            }
+                                            }
+                                        }
+                                        engine.entities.push(r3);
+                                    }
+                                }
+                            }
+                            engine.entities.push(r2); // 2段目に落ちる球をエンティティ配列に加える
+                        }
+                    }
+
+                }
+                offset = 0;
+                engine.entities.push(r);
+                shotBall++;
+                spendMoney = 4000*shotBall;
+            }
+        }
+
+
+        function repaint() { // 再描画関数
+            // 背景の描画
+            ctx.fillStyle = "purple"; // 塗りつぶしプロパティの色を設定して、
+            ctx.fillRect(0, 0, 500, 600); // canvasのサイズいっぱいに合わせた四角形を生成
+            let image = document.getElementById("numa"); // 予めdisplay:none;で仕込んでおいたimg要素をオブジェクトとして取得
+            ctx.drawImage(image, 0, 0, 250, 300, 20, 0, 500, 600); // 元画像を切り抜いてからcanvasいっぱいに表示
+
+            // ボール・壁の描画
+            for (let i = 0 ; i < engine.entities.length; i++) { // entities配列の全要素に対してコンテキストプロパティを設定
+                let e = engine.entities[i];
+                ctx.fillStyle = e.color; // 塗りつぶしプロパティを設定
+                switch (e.shape) { // shapeプロパティが
+                    case ShapeCircle: // Circleだったら
+                        ctx.beginPath();
+                        ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2); // 円を描くメソッドを適用
+                        ctx.closePath();
+                        ctx.fill();
+                        break;
+                    case ShapeRectangle: // Rectangleだったら
+                        ctx.fillRect(e.x, e.y, e.w, e.h); // 矩形を描くメソッドを発動
+                        break;
+                    case ShapeLine: // Lineだったら
+                        ctx.lineWidth = e.lineWidth; // コンテキストプロパティにeの線の太さプロパティを渡す
+                        ctx.strokeStyle = e.color;
+                        ctx.beginPath();
+                        ctx.moveTo(e.x0, e.y0); // 線を描くメソッドを発動
+                        ctx.lineTo(e.x1, e.y1); // 線を描くメソッドを発動
+                        ctx.stroke();
+                        break;
+                }
+            }
+
+            // 発射台の球を描画
+            ctx.fillStyle = "silver";
+            ctx.beginPath();
+            ctx.arc(10, 495 + offset, 5, 0, Math.PI * 2);
+            ctx.closePath();
+            ctx.fill();
+
+            // 発射台を描画
+            ctx.fillStyle = "gray";
+            ctx.fillRect(0, 500 + offset, 20, 100);
+        }
+
+
+        function decoration() { // 装飾関数を定義: 色んな演出系関数を一つにまとめる
+            // 戦況を表示
+            document.getElementById("shotBall").textContent = shotBall;
+            document.getElementById("spendMoney").textContent = spendMoney.toLocaleString('ja-JP');
+            document.getElementById("hit_gate").textContent = hit_gate;
+            document.getElementById("hit_kroon1").textContent = hit_kroon1;
+            document.getElementById("hit_kroon2").textContent = hit_kroon2;
+            document.getElementById("hit_kroon3").textContent = hit_kroon3;
+
+            // 戦況の切替
+            if (!jackpot.virgin){ // 大当たり後
+                looks_kaiji = 6;
+                looks_ichijo = 6;
+                setInterval(ending, 1000); // 無限に大放出
+            } else if (hit_kroon3 >= settings.hit.kroon3){
+                looks_kaiji = 5;
+                looks_ichijo = 5;
+                visual = 6;
+            } else if (hit_kroon2 >= settings.hit.kroon2){
+                looks_ichijo = 4;
+                visual = 5;
+            } else if (hit_kroon1 >= settings.hit.kroon1){
+                looks_ichijo = 3;
+                visual = 4;
+            } else if (hit_gate >= settings.hit.gate){
+                looks_kaiji = 4;
+                looks_ichijo = 2;
+                visual = 3;
+            } else if (shotBall >= settings.shot.third){
+                looks_kaiji = 3;
+            } else if (shotBall >= settings.shot.second){
+                looks_kaiji = 2;
+                looks_ichijo = 1;
+                visual = 2;
+            } else if (shotBall >= settings.shot.first){
+                looks_kaiji = 1;
+                visual = 1;
+            }
+            if (document.getElementById("visual-img")){ // html書き換えで存在が消えたときのエラー対策
+                document.getElementById("visual-img").src = img_visual[visual];
+            }
+            document.getElementById("looks_kaiji").src = img_kaiji[looks_kaiji];
+            document.getElementById("looks_ichijo").src = img_ichijo[looks_ichijo];
+        }
+
+        function music() {
+            if (shotBall == settings.shot.first){
+                soundPlay(sound_first);
+            }
+            if (shotBall == settings.shot.second){
+                soundPlay(sound_second);
+            }
+        }
+
+        function videoPlay(){ // 動画を再生する関数を定義
+            // 戦況の切替
+            if (!jackpot.virgin){ // 大当たり後
+                $("#visual-area").html(`<video id="video2" src="./video/kanki.mp4#t=26" width="400" autoplay onended="endingVideo()"></video>`);
+            } else if (hit_kroon3 >= settings.hit.kroon3){
+                $("#visual-area").html(`<video id="video1" src="./video/videoplayback.mp4#t=26,165" width="400" autoplay loop></video>`);
+                $("bgm").remove();
+            }
+        }
+
+        function ending(){ // エンディングの時に球を大放出する演出の関数を定義
+            for(let i = 0; i < 10; i++){
+                let r = new CircleEntity(260 + (0.5 - Math.random())*100, 10 + (0.5 - Math.random())*10, 5, BodyDynamic, 0.8); // 球を生成
+                r.color = "silver";
+                engine.entities.push(r);
+            }
+        }
+
+        function endingVideo(){
+            $("#visual-area").html(`<video id="video3" src="./video/ending.mp4#t=11" width="400" autoplay onended="endingMsg()"></video>`); 
+        }
+        function endingMsg(){
+            document.getElementById("insert-img").src = "./img/kaiji_ending1.jpg";
+            $("#insert").slideDown(4000);
+        }
+
+    </script>
+</head>
+<body onload="init()">
+    <header>
+        <p class="title">賭博黙示録 カイジ 人喰い沼<span> ~1球 4,000円 パチンコ~</span></p>
+    </header>
+    <div class="wrapper">
+        <canvas id="canvas" width="500" height="600"></canvas>
+        <div id="sub-display">
+            <div id="progress">
+                <p>発射球数: <span id="shotBall"></span></p>
+                <p>消費金額: <span id="spendMoney"></span>円</p>
+                <p>鉄の門番へのヒット数: <span id="hit_gate"></span></p>
+                <p>クルーン1段目へのヒット数: <span id="hit_kroon1"></span></p>
+                <p>クルーン2段目へのヒット数: <span id="hit_kroon2"></span></p>
+                <p>クルーン3段目へのヒット数: <span id="hit_kroon3"></span></p>
+            </div>
+            <div id="visual-area">
+                <img id="visual-img" src="./img/title.jpg" alt="" width="400">
+            </div>
+            <div id="looks">
+                <div id="kaiji">
+                    <img id="looks_kaiji" src="./img/kaiji0.jpg" alt="" width="200">
+                </div>
+                <div id="ichijo">
+                    <img id="looks_ichijo" src="./img/ichijo0.png" alt=""width="200">
+                </div>
+            </div>
+        </div>
+        <div id="insert">
+            <img id="insert-img" class="blink" src="./img/bonus2.jpg" alt="" width="600">
+        </div>
+    </div> 
+    <img id="numa" src="./img/numa.jpg" style="display: none;" alt="">
+    <audio id="bgm" src="./sound/sound_bgm.mp3" autoplay loop controls></audio>
+    <footer>
+        <small>Welcome you Craps - the scum of society - to this Death Game. Press the Space Key to launch.</small>
+    </footer>
+</body>
+</html>
